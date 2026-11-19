@@ -74,4 +74,21 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+### Project knowledge: `brain/` and `docs/`
+
+These two directories are the permanent record of the project. Read them before
+starting work, and keep them current as part of the work, not as an afterthought.
+
+- **`brain/` — the "what".** What the project does and why: purpose, users,
+  requirements, features, behaviors, domain concepts, and product decisions.
+  No implementation details.
+- **`docs/` — the "how".** How the components are built and connected:
+  architecture, components, data flow, interfaces, storage, deployment, and
+  technical decisions.
+
+Rules:
+- When a change alters what the project does, update `brain/`. When it alters
+  how it is built or wired together, update `docs/`. Often both.
+- Develop these docs collaboratively with the user; propose updates when
+  something drifts out of date.
+- Each directory has a `README.md` index; add new files to it.
