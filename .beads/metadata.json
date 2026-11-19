@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "temporal_storage_tracker",
+  "project_id": "8b26f162-348b-4c9c-9397-b4ba2346e629"
+}
