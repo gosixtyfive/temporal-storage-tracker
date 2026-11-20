@@ -107,35 +107,42 @@ duration). The default is `168h` (7 days); a demo might use `7m`.
 
 ## Local development
 
+Run each in its own terminal from the repo root (see the `Makefile`):
+
 ```bash
-# Terminal 1: Temporal dev server, with the custom search attribute
-temporal server start-dev --search-attribute ItemStatus=Keyword
-
-# Terminal 2: worker
-go run ./backend/cmd/worker
-
-# Terminal 3: API (compressed demo timing)
-STORAGE_DURATION=7m go run ./backend/cmd/api
-
-# Terminal 4: frontend
-cd frontend && npm run dev
+make temporal   # Temporal dev server with the ItemStatus search attribute
+make worker     # Temporal worker
+make api        # HTTP API on :8080; STORAGE_DURATION defaults to 7m here
+cd frontend && npm run dev   # frontend
 ```
+
+`make test`, `make vet` and `make build` cover the backend.
+
+Environment variables:
+
+| Variable | Used by | Default |
+|----------|---------|---------|
+| `TEMPORAL_ADDRESS` | API, worker | `localhost:7233` |
+| `TEMPORAL_NAMESPACE` | API, worker | `default` |
+| `STORAGE_DURATION` | API | `168h` (`make api` overrides it to `7m`) |
+| `PORT` | API | `8080` |
 
 The Temporal Web UI (http://localhost:8233) shows workflow histories next to
 the app. That is a large part of the demo.
 
-## Repository layout (planned)
+## Repository layout
 
 ```
-backend/
-  go.mod
-  cmd/api/            HTTP server (Temporal client)
-  cmd/worker/         Temporal worker
-  internal/storage/   Workflow, activities, shared types
-  internal/api/       HTTP handlers
-frontend/             Nuxt app
-brain/                What the project does
-docs/                 How it is built
+Makefile                     Local dev targets
+backend/                     Go module github.com/gosixtyfive/temporal-storage-tracker/backend
+  cmd/api/                   HTTP server (Temporal client)
+  cmd/worker/                Temporal worker
+  internal/storage/          Workflow, activities, shared types, task queue name
+  internal/temporalclient/   Temporal client setup from the environment
+  internal/api/              HTTP handlers (planned)
+frontend/                    Nuxt app (planned)
+brain/                       What the project does
+docs/                        How it is built
 ```
 
 ## Key decisions
