@@ -22,7 +22,8 @@ func main() {
 	defer c.Close()
 
 	w := worker.New(c, storage.TaskQueue, worker.Options{})
-	// Workflow and activity registration is added in tst-ofp.3.
+	w.RegisterWorkflow(storage.StorageItemWorkflow)
+	w.RegisterActivity(storage.SendNotification)
 
 	logger.Info("worker starting", "taskQueue", storage.TaskQueue)
 	if err := w.Run(worker.InterruptCh()); err != nil {
