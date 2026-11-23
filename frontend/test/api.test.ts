@@ -1,6 +1,6 @@
 import { FetchError } from 'ofetch'
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, createApi, type Fetcher, isPending, isTerminal, toApiError } from '~/utils/api'
+import { ApiError, createApi, type Fetcher, isTerminal, isUnreachable, toApiError } from '~/utils/api'
 
 const item = {
   id: 'item-1',
@@ -80,8 +80,8 @@ describe('toApiError', () => {
   })
 
   it('falls back to the status text, then a generic message', () => {
-    expect(toApiError(fetchError(502, '<html>bad gateway</html>', 'Bad Gateway')))
-      .toMatchObject({ status: 502, message: 'Bad Gateway' })
+    expect(toApiError(fetchError(500, '<html>oops</html>', 'Internal Server Error')))
+      .toMatchObject({ status: 500, message: 'Internal Server Error' })
     expect(toApiError(fetchError(500))).toMatchObject({ status: 500, message: 'Request failed (500)' })
   })
 
@@ -90,17 +90,20 @@ describe('toApiError', () => {
     expect(toApiError(undefined)).toMatchObject({ status: 0 })
   })
 
+  it('treats a bare 502 from the proxy as unreachable, but keeps API errors', () => {
+    const proxy = toApiError(fetchError(502, '<html>Bad Gateway</html>', 'Bad Gateway'))
+    expect(proxy).toMatchObject({ status: 502, message: 'Could not reach the server' })
+    expect(isUnreachable(proxy)).toBe(true)
+    expect(isUnreachable(toApiError(new TypeError('fetch failed')))).toBe(true)
+
+    const api = toApiError(fetchError(503, { error: 'workflow service unavailable' }))
+    expect(api).toMatchObject({ status: 503, message: 'workflow service unavailable' })
+    expect(isUnreachable(api)).toBe(false)
+  })
+
   it('passes ApiErrors through', () => {
     const err = new ApiError(404, 'item not found')
     expect(toApiError(err)).toBe(err)
-  })
-})
-
-describe('isPending', () => {
-  it('is true only for a 404 ApiError', () => {
-    expect(isPending(new ApiError(404, 'item not found'))).toBe(true)
-    expect(isPending(new ApiError(409, 'ended'))).toBe(false)
-    expect(isPending(new Error('404'))).toBe(false)
   })
 })
 

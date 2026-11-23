@@ -6,5 +6,5 @@ How it is built belongs in [`../docs/`](../docs/README.md).
 
 ## Index
 
-- [overview.md](overview.md): purpose, scenario, roles, core features,
-  storage timing, item lifecycle, and open questions
+- [overview.md](overview.md): purpose, scenario, core features (two views),
+  running a demo, storage timing, item lifecycle, and open questions

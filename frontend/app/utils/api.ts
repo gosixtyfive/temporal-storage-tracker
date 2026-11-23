@@ -49,12 +49,15 @@ export class ApiError extends Error {
   }
 }
 
+const UNREACHABLE = 'Could not reach the server'
+
 /**
- * A just-stored item is written by its workflow's first step, so the API
- * answers 404 until then. The status view shows such an item as pending.
+ * True when the Go server could not be reached: either the request failed
+ * outright (status 0), or the Nuxt proxy answered 502 Bad Gateway because
+ * nothing was listening behind it.
  */
-export function isPending(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 404
+export function isUnreachable(err: unknown): boolean {
+  return err instanceof ApiError && err.message === UNREACHABLE
 }
 
 export interface FetchOptions {
@@ -103,11 +106,14 @@ export function toApiError(err: unknown): ApiError {
   const e = (err ?? {}) as { status?: unknown, statusCode?: unknown, statusText?: unknown, data?: unknown, message?: unknown }
   const status = typeof e.status === 'number' ? e.status : typeof e.statusCode === 'number' ? e.statusCode : 0
   if (status === 0) {
-    return new ApiError(0, 'Could not reach the server')
+    return new ApiError(0, UNREACHABLE)
   }
   const data = e.data as { error?: unknown } | undefined
   if (typeof data?.error === 'string' && data.error) {
     return new ApiError(status, data.error)
+  }
+  if (status === 502) {
+    return new ApiError(502, UNREACHABLE) // the proxy found nothing listening
   }
   if (typeof e.statusText === 'string' && e.statusText) {
     return new ApiError(status, e.statusText)

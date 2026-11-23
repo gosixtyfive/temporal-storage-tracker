@@ -28,8 +28,8 @@ application does, see [`../brain/overview.md`](../brain/overview.md).
                              └──────────────────────────────┘
 ```
 
-- **Nuxt frontend.** Pages for storing an item, viewing an item's status, and
-  the admin dashboard. It talks only to the Go API. During development, Nuxt
+- **Nuxt frontend.** Two pages: Add item and the Dashboard. It talks only to
+  the Go API. During development, Nuxt
   proxies `/api/*` to the Go API, so the browser needs no CORS setup.
 - **Go server** (`cmd/server`). One process that hosts three parts sharing
   one store:
@@ -111,17 +111,18 @@ persistent store.
 
 | Method | Path | Does | Used by |
 |--------|------|------|---------|
-| `POST` | `/api/items` | Start `StorageItemWorkflow`; returns `201` with the new ID | Store item form |
+| `POST` | `/api/items` | Start `StorageItemWorkflow`; returns `201` with the new ID | Add item |
 | `GET` | `/api/items` | List items from the store; optional `?status=` | Dashboard |
-| `GET` | `/api/items/{id}` | Read the item from the store | Item status view |
-| `POST` | `/api/items/{id}/collect` | Update `collect`, then return the item | Item status view (member) |
-| `POST` | `/api/items/{id}/remove` | Update `remove`, then return the item | Dashboard (admin) |
-| `GET` | `/api/config` | Current timing | Frontend |
+| `GET` | `/api/items/{id}` | Read the item from the store | (not used by the UI) |
+| `POST` | `/api/items/{id}/collect` | Update `collect`, then return the item | Dashboard |
+| `POST` | `/api/items/{id}/remove` | Update `remove`, then return the item | Dashboard |
+| `GET` | `/api/config` | Current timing | Dashboard header |
 
-- **Pending items.** `POST /api/items` returns as soon as the workflow has
-  started, before its first activity has written the row. Until then,
-  `GET /api/items/{id}` returns `404`. The status view, which the form
-  navigates to, shows "pending" and keeps polling until the item appears.
+- **New items appear shortly after creation.** `POST /api/items` returns as
+  soon as the workflow has started, before its first activity has written
+  the row. Until then the item is missing from the store (`GET
+  /api/items/{id}` returns `404`). The dashboard simply shows it on its next
+  poll, so the UI has no "pending" state.
 - Updates return the item as read from the store after the Update completes,
   or an error, so the UI can react without waiting for the next poll. The
   handler checks the store first: unknown items get `404` and ended items
@@ -152,36 +153,35 @@ place of Temporal.
 
 ## Frontend
 
-| Route | View | Role |
-|-------|------|------|
-| `/` | Landing page with role switcher | Both |
-| `/store` | Store item form | Member |
-| `/items/[id]` | Item status view: details, time left, notifications, Collect button | Member |
-| `/dashboard` | All items with state, time left, notifications, Remove button | Admin |
+| Route | View |
+|-------|------|
+| `/` | Redirects to `/dashboard` |
+| `/add` | Add item form |
+| `/dashboard` | All items with state, time left, notifications, and Collect / Remove actions; the current storage timing in its header |
 
-- **Role switching.** A toggle in the header switches between Member and
-  Admin. The choice is kept in browser storage. It only changes navigation
-  and which actions are shown; nothing enforces it (see the non-goals in
-  `brain/`).
-- **Member identity.** The store form asks for a member name in plain text.
-  There are no accounts.
-- **Live updates.** The status view and dashboard poll the API every few
-  seconds, which is enough for compressed demo timings.
-- **Client-side only.** Nuxt runs with `ssr: false`. The role lives in browser
-  storage, so server rendering would paint the wrong role first; nothing
-  needs SEO or server-side data loading.
+- **No roles.** A single switch in the header moves between Add item and
+  Dashboard. Anyone can do anything (see `brain/overview.md`).
+- **Demo layout.** Meant to be used in two windows side by side: one adding
+  items, one watching the dashboard.
+- **Add item.** Asks for the member name in plain text (there are no
+  accounts), the item name, and an optional description. After a successful
+  add it stays on the form, clears it except for the member name, and shows a
+  toast, so several items can be entered in a row.
+- **Live updates.** The dashboard polls the API every few seconds, which is
+  enough for compressed demo timings.
+- **Client-side only.** Nuxt runs with `ssr: false`. Every view is live data
+  from the API, so server rendering would add nothing; nothing needs SEO.
 - **UI library.** Nuxt UI (built on Tailwind) for forms, badges, tables and
   toasts.
 - **API access.** A Nuxt route rule proxies `/api/**` to the Go server
   (`http://localhost:8080` by default, overridable by environment variable).
   A `useApi()` composable holds typed versions of the API's JSON and turns
-  `{"error": ...}` responses into errors that carry the status code; a `404`
-  on an item means "pending".
-- **Roles on any page.** Every page loads for either role; only actions
-  depend on it. A member on `/dashboard` sees a hint to switch to Admin rather
-  than a redirect.
-- **Finding an item again.** Only by its URL; the dashboard is the only list
-  of items. The browser does not remember a member's items.
+  `{"error": ...}` responses into errors that carry the status code. When the
+  Go server is down, the proxy answers `502` without an API error body; the
+  client reports that, like a failed request, as "could not reach the server".
+- **Add item focus.** Nuxt UI's form disables its inputs while the submit
+  handler runs, so the page moves focus back to Item name only after the
+  form has finished loading.
 
 ## Time compression
 
@@ -239,10 +239,10 @@ backend/                     Go module github.com/gosixtyfive/temporal-storage-t
   internal/temporalclient/   Temporal client setup from the environment
   internal/api/              HTTP handlers
 frontend/                    Nuxt app
-  app/pages/                 Routes: /, /store, /items/[id], /dashboard
-  app/components/            Header, role switch, role hint
-  app/composables/           useApi(), useRole()
-  app/utils/                 API types and client, role state, formatting
+  app/pages/                 Routes: / (redirect), /add, /dashboard
+  app/components/            Header with the view switch, dashboard parts
+  app/composables/           useApi()
+  app/utils/                 API types and client, formatting
   test/                      Vitest unit tests for app/utils
 brain/                       What the project does
 docs/                        How it is built
@@ -261,6 +261,10 @@ docs/                        How it is built
 - **API and worker in one process.** The in-memory store can only be shared
   inside one process. The cost is that the demo cannot restart the worker on
   its own; with a persistent store they can be split again.
+- **Two views, no roles.** Add item and Dashboard, with collect and remove
+  on the dashboard. A demo runs them in two windows side by side, which shows
+  the workflows better than one page per item. (Replaced a Member/Admin role
+  switch with a separate item status view.)
 - **No custom search attributes.** The dashboard filters in the store, so
   Temporal visibility is not needed.
 - **Updates rather than Signals** for collect and remove. Updates can reject

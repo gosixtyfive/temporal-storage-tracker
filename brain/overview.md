@@ -17,31 +17,39 @@ and after it has expired.
 Each stored item is a long-running process with time-based steps, which is a
 natural fit for a Temporal workflow.
 
-## Roles
+## People in the scenario
 
-There is **no authentication** in the demo. A single person using the app can
-switch between two roles:
-
-| Role | What they do |
-|------|--------------|
-| **Member** | Stores an item and checks on its status |
-| **Admin** | Watches every stored item across the space |
+**Members** leave items in the storage area and collect them again.
+**Admins** look after the storage area and can remove items. These are
+people in the scenario, not roles in the app: the demo has **no accounts and
+no role switching**. Anyone using it can add items and collect or remove
+them.
 
 ## Core features
 
-1. **Store an item.** A simple form where a member registers an item they
-   are leaving in the shared area.
-2. **Item status view.** Shows one stored item: its details, how much
-   storage time is left, and where it is in its lifecycle.
-3. **Dashboard view.** An admin overview of all stored items and their
-   states, highlighting those that are expiring soon or have expired.
-4. **Notifications.** The member is notified when:
+The app has two views, with a single switch between them:
+
+1. **Add item.** A simple form to register an item a member is leaving in
+   the shared area. Each item added starts its own workflow. The form stays
+   open so several items can be added in a row.
+2. **Dashboard.** Every stored item with its state, how much storage time is
+   left, and its notifications, highlighting items that are expiring soon or
+   have expired. From here an item can be **collected** (by its member) or
+   **removed** (by an admin).
+3. **Notifications.** The member is notified when:
    - the item's storage time is **about to expire**,
    - the item **has expired** (once; nothing further is sent after expiry),
    - an admin **removes** the item.
 
-   Notifications are shown in the UI (on the item status view and the
-   dashboard). No email or other external delivery.
+   Notifications are shown on the dashboard. No email or other external
+   delivery.
+
+## Running a demo
+
+The intended setup is **two browser windows side by side**: one on Add item
+to enter items, one on the Dashboard to watch every item move through its
+lifecycle as it happens. The Temporal Web UI can sit alongside to show the
+workflows themselves.
 
 ## Storage timing
 
@@ -91,6 +99,9 @@ _None right now._
 
 ## Resolved
 
+- The app has two views, Add item and Dashboard, and no roles. Collect and
+  remove both happen on the dashboard; there is no separate item status
+  page. (Replaced an earlier Member/Admin role switch with a status view.)
 - Notifications are shown in the UI only; no email.
 - Storage time cannot be extended.
 - An admin can remove an item at any time, and the member is notified.

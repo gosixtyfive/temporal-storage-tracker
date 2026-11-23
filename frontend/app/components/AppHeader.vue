@@ -1,38 +1,37 @@
 <script setup lang="ts">
-import type { NavigationMenuItem } from '@nuxt/ui'
+// The app has two views and one switch between them; there are no roles.
+// See docs/architecture.md#frontend.
+const views = [
+  { label: 'Add item', icon: 'i-lucide-package-plus', to: '/add' },
+  { label: 'Dashboard', icon: 'i-lucide-layout-dashboard', to: '/dashboard' },
+]
 
-const { isAdmin } = useRole()
-
-// Navigation follows the role; every page still loads for either role.
-const items = computed<NavigationMenuItem[]>(() => [
-  { label: 'Home', icon: 'i-lucide-house', to: '/' },
-  isAdmin.value
-    ? { label: 'Dashboard', icon: 'i-lucide-layout-dashboard', to: '/dashboard' }
-    : { label: 'Store an item', icon: 'i-lucide-package-plus', to: '/store' },
-])
+const route = useRoute()
 </script>
 
 <template>
-  <UHeader to="/">
+  <UHeader to="/dashboard" :toggle="false">
     <template #title>
       <span class="flex items-center gap-2">
         <UIcon name="i-lucide-archive" class="size-5 text-primary" />
-        Storage Tracker
+        <span class="hidden sm:inline">Storage Tracker</span>
       </span>
     </template>
 
-    <UNavigationMenu :items="items" />
-
     <template #right>
-      <RoleSwitch class="hidden sm:flex" />
+      <UFieldGroup size="sm" aria-label="View">
+        <UButton
+          v-for="view in views"
+          :key="view.to"
+          :to="view.to"
+          :label="view.label"
+          :icon="view.icon"
+          :color="route.path === view.to ? 'primary' : 'neutral'"
+          :variant="route.path === view.to ? 'solid' : 'outline'"
+          :aria-current="route.path === view.to ? 'page' : undefined"
+        />
+      </UFieldGroup>
       <UColorModeButton />
-    </template>
-
-    <template #body>
-      <div class="flex flex-col gap-4">
-        <UNavigationMenu :items="items" orientation="vertical" class="-mx-2.5" />
-        <RoleSwitch />
-      </div>
     </template>
   </UHeader>
 </template>
