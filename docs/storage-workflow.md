@@ -23,8 +23,6 @@ Derived inside the workflow from `workflow.Now()` when it starts:
 
 ## States
 
-`ItemStatus` values. The search attribute is updated on every transition.
-
 | Status | Meaning | Terminal |
 |--------|---------|----------|
 | `Stored` | Within its time | no |
@@ -35,24 +33,27 @@ Derived inside the workflow from `workflow.Now()` when it starts:
 
 ## Flow
 
+Every step that touches the store is an activity (see [Activities](#activities)).
+
 ```
 start
-  │ status = Stored
+  ▼
+CreateItem                (row with status Stored and the derived timings)
   ▼
 wait for: timer(ReminderAt) │ collect │ remove
   │ timer
   ▼
-SendNotification(ExpiringSoon); status = ExpiringSoon
+SendNotification(ExpiringSoon); SetItemStatus(ExpiringSoon)
   ▼
 wait for: timer(ExpiresAt) │ collect │ remove
   │ timer
   ▼
-SendNotification(Expired); status = Expired
+SendNotification(Expired); SetItemStatus(Expired)
   ▼
 wait for: collect │ remove   (no further timers or notifications)
 
-on collect: status = Collected; workflow completes
-on remove:  SendNotification(RemovedByAdmin); status = RemovedByAdmin;
+on collect: SetItemStatus(Collected); workflow completes
+on remove:  SendNotification(RemovedByAdmin); SetItemStatus(RemovedByAdmin);
             workflow completes
 ```
 
@@ -75,6 +76,13 @@ running. The workflow keeps its state consistent with these rules:
   the workflow re-checks whether the item is ending before it sets
   `ExpiringSoon` or `Expired`. If a terminal Update arrived during the
   activity, the timer-driven transition is skipped.
+- **Created before ended.** Update handlers wait until `CreateItem` has
+  completed before they write anything, so a terminal status is never written
+  for an item the store does not have yet.
+- **Terminal guard in the store.** A timer-driven `SetItemStatus` can still be
+  in flight when a terminal Update writes its status. The store never changes
+  a terminal status (see `docs/architecture.md#store`), so the late write is
+  a no-op.
 - **Drain handlers before completing.** Before returning, the workflow waits
   for `workflow.AllHandlersFinished`, so a `remove` handler that is still
   sending its notification finishes and returns its result.
@@ -102,12 +110,22 @@ notification has been sent.
 
 ## Query: `getStatus`
 
-Returns `ItemState`: the input fields, `StoredAt`, `ReminderAt`, `ExpiresAt`,
-`Status`, `EndedAt` (once terminal), and `Notifications`. That last field is
-the list of notifications sent so far, each with a kind, message and
-timestamp. The status view and dashboard render this list.
+Returns the workflow's own `ItemState`: the input fields, `StoredAt`,
+`ReminderAt`, `ExpiresAt`, `Status`, `EndedAt` (once terminal), and the
+notifications sent so far. It mirrors what the workflow has written to the
+store and is there for inspection in the Temporal UI and CLI. The application
+reads the store, not this Query.
 
-## Activity: `SendNotification`
+## Activities
+
+The activities are methods on an `Activities` struct that holds the
+`store.Store`, so tests can pass in an in-memory store and inspect it.
+
+| Activity | Store call | Notes |
+|----------|------------|-------|
+| `CreateItem` | `CreateItem` | First step. Writes the input, timings and `Stored` |
+| `SetItemStatus` | `SetStatus` | Sets `EndedAt` for terminal statuses |
+| `SendNotification` | `AddNotification` | Logs the notification, then records it for the UI |
 
 ```go
 type Notification struct {
@@ -115,23 +133,24 @@ type Notification struct {
     MemberName string
     Kind       string // ExpiringSoon | Expired | RemovedByAdmin
     Message    string
+    SentAt     time.Time
 }
 ```
 
 Responsibilities are split along the side-effect boundary:
 
-- **Workflow:** composes the `Notification`, including the message text,
-  which comes only from the input and the derived timings, so building it is
-  deterministic. After the activity succeeds, the workflow appends the
-  notification to its `Notifications` list, timestamped with `workflow.Now()`.
-  The list is workflow state, which only the workflow can change; that is how
-  notifications reach the UI.
-- **Activity:** delivers the notification. In the demo that means logging it.
-  Because delivery is in an activity, real email or SMS could be added later
-  without changing the workflow.
+- **Workflow:** decides what happens and when. It composes each notification,
+  including the message text, which comes only from the input and the derived
+  timings, so building it is deterministic. It also supplies every timestamp
+  (`StoredAt`, `SentAt`, `EndedAt`) from `workflow.Now()`, so time-skipping
+  tests can assert when things happen.
+- **Activities:** perform the writes. "Delivering" a notification means
+  recording it in the store, where the UI shows it; email or SMS could be
+  added in the same activity later without changing the workflow.
 
-The timestamp comes from the workflow clock rather than the activity's wall
-clock, so time-skipping tests can assert when notifications happen.
+Every store write is idempotent, so retries are safe. If an activity finds no
+item (for example, the in-memory store was lost on a restart), it fails with a
+non-retryable `ItemNotFound` error, and the workflow fails.
 
 Retry policy: Temporal's default (unlimited retries with backoff), with a
 `StartToCloseTimeout` of 10 seconds.
@@ -139,7 +158,11 @@ Retry policy: Temporal's default (unlimited retries with backoff), with a
 ## Testing
 
 Use the Go SDK's `testsuite.WorkflowTestSuite`. Its test environment skips
-time, so a full 7-day lifecycle runs in milliseconds. Cover:
+time, so a full 7-day lifecycle runs in milliseconds. The activities run
+against a real in-memory store, so tests assert on the store's contents as
+well as the workflow result. Cover:
+
+- `CreateItem` as the first step, with the derived timings
 
 - the full path to `Expired` with both notifications, at the right times
 - `collect` from each non-terminal state
@@ -152,3 +175,4 @@ time, so a full 7-day lifecycle runs in milliseconds. Cover:
   still in progress
 - `remove` returns the final `RemovedByAdmin` state with its notification
 - a non-positive `StorageDuration` fails the workflow
+- an activity finding no item fails the workflow without retrying
