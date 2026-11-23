@@ -6,14 +6,31 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 )
 
-// notificationTimeout bounds each SendNotification attempt. Retries use
-// Temporal's default policy (unlimited, with backoff).
-const notificationTimeout = 10 * time.Second
+// activityTimeout bounds each activity attempt. Retries use Temporal's
+// default policy (unlimited, with backoff).
+const activityTimeout = 10 * time.Second
+
+// acts is used only to name activities in ExecuteActivity calls; the worker
+// registers a real *Activities.
+var acts *Activities
+
+// execute runs an activity and waits for it. It sets the activity options on
+// every call because Update handlers receive their own context, which does
+// not inherit options set on the workflow's main context.
+func execute(ctx workflow.Context, activity any, arg any) error {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: activityTimeout,
+	})
+	return workflow.ExecuteActivity(ctx, activity, arg).Get(ctx, nil)
+}
 
 // StorageItemWorkflow tracks one stored item from storage to Collected or
-// RemovedByAdmin. It returns the final ItemState.
+// RemovedByAdmin, writing every change to the store through activities. It
+// returns the final ItemState.
 func StorageItemWorkflow(ctx workflow.Context, in StoreItemInput) (ItemState, error) {
 	if in.StorageDuration <= 0 {
 		return ItemState{}, temporal.NewNonRetryableApplicationError(
@@ -29,16 +46,17 @@ func StorageItemWorkflow(ctx workflow.Context, in StoreItemInput) (ItemState, er
 			StoredAt:       now,
 			ReminderAt:     expiresAt.Add(-in.StorageDuration / 7),
 			ExpiresAt:      expiresAt,
-			Notifications:  []SentNotification{},
+			Status:         store.StatusStored,
+			Notifications:  []store.Notification{},
 		},
 	}
 	if err := w.register(ctx); err != nil {
 		return ItemState{}, err
 	}
-	if err := w.setStatus(ctx, StatusStored); err != nil {
+
+	if err := w.create(ctx); err != nil {
 		return ItemState{}, err
 	}
-
 	if err := w.run(ctx); err != nil {
 		return ItemState{}, err
 	}
@@ -53,10 +71,13 @@ func StorageItemWorkflow(ctx workflow.Context, in StoreItemInput) (ItemState, er
 
 type itemWorkflow struct {
 	state ItemState
+	// created is set once CreateItem has written the item to the store.
+	// Update handlers wait for it before writing anything.
+	created bool
 	// ending is set to the terminal status as soon as a collect or remove
 	// Update is accepted. From then on, validators reject further terminal
 	// Updates and timer-driven transitions are skipped.
-	ending Status
+	ending store.Status
 }
 
 func (w *itemWorkflow) register(ctx workflow.Context) error {
@@ -73,20 +94,41 @@ func (w *itemWorkflow) register(ctx workflow.Context) error {
 		workflow.UpdateHandlerOptions{Validator: w.validateTerminal})
 }
 
+// create writes the item to the store: the workflow's first step.
+func (w *itemWorkflow) create(ctx workflow.Context) error {
+	s := w.state
+	item := store.Item{
+		ID:              s.ItemID,
+		MemberName:      s.MemberName,
+		ItemName:        s.ItemName,
+		Description:     s.Description,
+		StorageDuration: s.StorageDuration,
+		StoredAt:        s.StoredAt,
+		ReminderAt:      s.ReminderAt,
+		ExpiresAt:       s.ExpiresAt,
+		Status:          store.StatusStored,
+	}
+	if err := execute(ctx, acts.CreateItem, item); err != nil {
+		return err
+	}
+	w.created = true
+	return nil
+}
+
 // run drives the timer-based part of the lifecycle and returns once a
 // terminal Update has been accepted.
 func (w *itemWorkflow) run(ctx workflow.Context) error {
 	steps := []struct {
 		at     time.Time
 		timer  string
-		kind   NotificationKind
-		status Status
+		kind   store.NotificationKind
+		status store.Status
 		msg    string
 	}{
-		{w.state.ReminderAt, "reminder", KindExpiringSoon, StatusExpiringSoon,
+		{w.state.ReminderAt, "reminder", store.KindExpiringSoon, store.StatusExpiringSoon,
 			fmt.Sprintf("Your item %q expires in %s. Please collect it before then.",
 				w.state.ItemName, humanDuration(w.state.StorageDuration/7))},
-		{w.state.ExpiresAt, "expiry", KindExpired, StatusExpired,
+		{w.state.ExpiresAt, "expiry", store.KindExpired, store.StatusExpired,
 			fmt.Sprintf("Your item %q has expired. Please collect it as soon as possible.",
 				w.state.ItemName)},
 	}
@@ -139,57 +181,73 @@ func (w *itemWorkflow) validateTerminal(ctx workflow.Context) error {
 }
 
 func (w *itemWorkflow) collect(ctx workflow.Context) (ItemState, error) {
-	w.ending = StatusCollected
-	if err := w.end(ctx, StatusCollected); err != nil {
+	w.ending = store.StatusCollected
+	if err := w.awaitCreated(ctx); err != nil {
+		return ItemState{}, err
+	}
+	if err := w.setStatus(ctx, store.StatusCollected); err != nil {
 		return ItemState{}, err
 	}
 	return w.state, nil
 }
 
 func (w *itemWorkflow) remove(ctx workflow.Context) (ItemState, error) {
-	w.ending = StatusRemovedByAdmin
-	msg := fmt.Sprintf("Your item %q was removed from the storage area by an admin.", w.state.ItemName)
-	if err := w.notify(ctx, KindRemovedByAdmin, msg); err != nil {
+	w.ending = store.StatusRemovedByAdmin
+	if err := w.awaitCreated(ctx); err != nil {
 		return ItemState{}, err
 	}
-	if err := w.end(ctx, StatusRemovedByAdmin); err != nil {
+	msg := fmt.Sprintf("Your item %q was removed from the storage area by an admin.", w.state.ItemName)
+	if err := w.notify(ctx, store.KindRemovedByAdmin, msg); err != nil {
+		return ItemState{}, err
+	}
+	if err := w.setStatus(ctx, store.StatusRemovedByAdmin); err != nil {
 		return ItemState{}, err
 	}
 	return w.state, nil
 }
 
-func (w *itemWorkflow) end(ctx workflow.Context, status Status) error {
-	endedAt := workflow.Now(ctx)
-	w.state.EndedAt = &endedAt
-	return w.setStatus(ctx, status)
+func (w *itemWorkflow) awaitCreated(ctx workflow.Context) error {
+	return workflow.Await(ctx, func() bool { return w.created })
 }
 
-// notify composes and delivers a notification, then records it in the
-// workflow state with the workflow-clock time it was sent.
-func (w *itemWorkflow) notify(ctx workflow.Context, kind NotificationKind, msg string) error {
-	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: notificationTimeout,
-	})
+// notify composes a notification, has the SendNotification activity deliver
+// it, and mirrors it in the workflow state.
+func (w *itemWorkflow) notify(ctx workflow.Context, kind store.NotificationKind, msg string) error {
 	n := Notification{
 		ItemID:     w.state.ItemID,
 		MemberName: w.state.MemberName,
 		Kind:       kind,
 		Message:    msg,
+		SentAt:     workflow.Now(ctx),
 	}
-	if err := workflow.ExecuteActivity(actx, SendNotification, n).Get(ctx, nil); err != nil {
+	if err := execute(ctx, acts.SendNotification, n); err != nil {
 		return err
 	}
-	w.state.Notifications = append(w.state.Notifications, SentNotification{
-		Kind:    kind,
-		Message: msg,
-		SentAt:  workflow.Now(ctx),
+	w.state.Notifications = append(w.state.Notifications, store.Notification{
+		Kind:    n.Kind,
+		Message: n.Message,
+		SentAt:  n.SentAt,
 	})
 	return nil
 }
 
-func (w *itemWorkflow) setStatus(ctx workflow.Context, s Status) error {
+// setStatus writes a status change to the store and mirrors it in the
+// workflow state, with the same terminal guard as the store: once the item
+// has ended, a late timer-driven change is ignored.
+func (w *itemWorkflow) setStatus(ctx workflow.Context, s store.Status) error {
+	at := workflow.Now(ctx)
+	in := SetItemStatusInput{ItemID: w.state.ItemID, Status: s, At: at}
+	if err := execute(ctx, acts.SetItemStatus, in); err != nil {
+		return err
+	}
+	if w.state.Status.Terminal() {
+		return nil
+	}
 	w.state.Status = s
-	return workflow.UpsertTypedSearchAttributes(ctx, ItemStatusKey.ValueSet(string(s)))
+	if s.Terminal() {
+		w.state.EndedAt = &at
+	}
+	return nil
 }
 
 // humanDuration renders the reminder lead time in the largest whole unit,

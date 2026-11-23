@@ -1,11 +1,12 @@
-// Package storage holds the StorageItemWorkflow, its activities, and the types
-// shared with the API. See docs/storage-workflow.md.
+// Package storage holds the StorageItemWorkflow, its activities, and the
+// Temporal-facing types shared with the API. Domain types (Status,
+// NotificationKind, Item) live in internal/store. See docs/storage-workflow.md.
 package storage
 
 import (
 	"time"
 
-	"go.temporal.io/sdk/temporal"
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 )
 
 // TaskQueue is the Temporal task queue the worker polls and the API starts
@@ -19,41 +20,16 @@ const (
 	QueryGetStatus = "getStatus"
 )
 
-// ErrTypeItemEnded is the ApplicationError type returned when a collect or
-// remove Update is rejected because the item has already ended (or is ending).
-const ErrTypeItemEnded = "ItemEnded"
-
-// ErrTypeInvalidInput is the ApplicationError type the workflow fails with
-// when it is started with invalid input.
-const ErrTypeInvalidInput = "InvalidInput"
-
-// ItemStatusKey is the custom search attribute that holds the item's Status.
-// The dashboard filters on it.
-var ItemStatusKey = temporal.NewSearchAttributeKeyKeyword("ItemStatus")
-
-// Status is where an item is in its lifecycle.
-type Status string
-
+// ApplicationError types used by the workflow and its activities.
 const (
-	StatusStored         Status = "Stored"
-	StatusExpiringSoon   Status = "ExpiringSoon"
-	StatusExpired        Status = "Expired"
-	StatusCollected      Status = "Collected"
-	StatusRemovedByAdmin Status = "RemovedByAdmin"
-)
-
-// Terminal reports whether the status ends tracking.
-func (s Status) Terminal() bool {
-	return s == StatusCollected || s == StatusRemovedByAdmin
-}
-
-// NotificationKind identifies why a notification was sent.
-type NotificationKind string
-
-const (
-	KindExpiringSoon   NotificationKind = "ExpiringSoon"
-	KindExpired        NotificationKind = "Expired"
-	KindRemovedByAdmin NotificationKind = "RemovedByAdmin"
+	// ErrTypeItemEnded: a collect or remove Update was rejected because the
+	// item has already ended (or is ending).
+	ErrTypeItemEnded = "ItemEnded"
+	// ErrTypeInvalidInput: the workflow was started with invalid input.
+	ErrTypeInvalidInput = "InvalidInput"
+	// ErrTypeItemNotFound: an activity found no item in the store. Not
+	// retryable; the workflow fails.
+	ErrTypeItemNotFound = "ItemNotFound"
 )
 
 // StoreItemInput starts a StorageItemWorkflow.
@@ -65,30 +41,32 @@ type StoreItemInput struct {
 	StorageDuration time.Duration // fixed per run; set by the API
 }
 
-// Notification is what the SendNotification activity delivers.
+// Notification is what the SendNotification activity delivers. The workflow
+// composes it, including SentAt from the workflow clock.
 type Notification struct {
 	ItemID     string
 	MemberName string
-	Kind       NotificationKind
+	Kind       store.NotificationKind
 	Message    string
+	SentAt     time.Time
 }
 
-// SentNotification is a notification the workflow has delivered, as shown in
-// the UI.
-type SentNotification struct {
-	Kind    NotificationKind
-	Message string
-	SentAt  time.Time
+// SetItemStatusInput is the SetItemStatus activity's input.
+type SetItemStatusInput struct {
+	ItemID string
+	Status store.Status
+	At     time.Time
 }
 
-// ItemState is the workflow's view of one item. The getStatus Query and both
-// Updates return it.
+// ItemState is the workflow's own view of one item. It mirrors what the
+// workflow has written to the store and is returned by the getStatus Query
+// and both Updates; the application reads the store instead.
 type ItemState struct {
 	StoreItemInput
 	StoredAt      time.Time
 	ReminderAt    time.Time
 	ExpiresAt     time.Time
-	Status        Status
+	Status        store.Status
 	EndedAt       *time.Time `json:",omitempty"`
-	Notifications []SentNotification
+	Notifications []store.Notification
 }

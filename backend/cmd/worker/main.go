@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/storage"
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/temporalclient"
 )
 
@@ -23,7 +24,8 @@ func main() {
 
 	w := worker.New(c, storage.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(storage.StorageItemWorkflow)
-	w.RegisterActivity(storage.SendNotification)
+	// Interim: a private store until cmd/server shares one with the API (tst-ofp.10).
+	w.RegisterActivity(&storage.Activities{Store: store.NewMemory()})
 
 	logger.Info("worker starting", "taskQueue", storage.TaskQueue)
 	if err := w.Run(worker.InterruptCh()); err != nil {

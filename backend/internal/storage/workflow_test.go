@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 )
 
 const (
@@ -29,13 +33,43 @@ func testInput() StoreItemInput {
 	}
 }
 
-func newEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
+// harness is a test environment whose activities write to a real in-memory
+// store.
+type harness struct {
+	env   *testsuite.TestWorkflowEnvironment
+	store *store.Memory
+	acts  *Activities
+}
+
+func newHarness(t *testing.T) *harness {
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
 	env.SetStartTime(t0)
-	env.RegisterActivity(SendNotification)
-	return env
+	mem := store.NewMemory()
+	a := &Activities{Store: mem}
+	env.RegisterActivity(a)
+	return &harness{env: env, store: mem, acts: a}
+}
+
+// storedItem reads the test item from the store.
+func (h *harness) storedItem(t *testing.T) store.Item {
+	t.Helper()
+	it, err := h.store.GetItem(context.Background(), "item-1")
+	require.NoError(t, err)
+	return it
+}
+
+// delaySendNotification makes SendNotification for the given kinds (all kinds
+// if none) take d on the workflow clock, still writing to the real store.
+func (h *harness) delaySendNotification(d time.Duration, kinds ...store.NotificationKind) {
+	match := mock.MatchedBy(func(n Notification) bool {
+		return len(kinds) == 0 || slices.Contains(kinds, n.Kind)
+	})
+	h.env.OnActivity(h.acts.SendNotification, mock.Anything, match).After(d).Return(h.acts.SendNotification)
+	if len(kinds) > 0 {
+		h.env.OnActivity(h.acts.SendNotification, mock.Anything, mock.Anything).Return(h.acts.SendNotification)
+	}
 }
 
 // updateResult captures the outcome of an Update sent in the test env.
@@ -81,52 +115,81 @@ func finalState(t *testing.T, env *testsuite.TestWorkflowEnvironment) ItemState 
 	return s
 }
 
-func kinds(ns []SentNotification) []NotificationKind {
-	out := make([]NotificationKind, len(ns))
+func kinds(ns []store.Notification) []store.NotificationKind {
+	out := make([]store.NotificationKind, len(ns))
 	for i, n := range ns {
 		out[i] = n.Kind
 	}
 	return out
 }
 
+func TestCreateItemIsFirstStep(t *testing.T) {
+	h := newHarness(t)
+	var created store.Item
+	h.env.RegisterDelayedCallback(func() { created = h.storedItem(t) }, time.Second)
+	h.env.RegisterDelayedCallback(func() { sendUpdate(h.env, UpdateCollect) }, time.Hour)
+
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+	finalState(t, h.env)
+
+	assert.Equal(t, store.Item{
+		ID:              "item-1",
+		MemberName:      "Sam",
+		ItemName:        "Bike frame",
+		Description:     "Steel frame, mid-repair",
+		StorageDuration: week,
+		StoredAt:        t0,
+		ReminderAt:      t0.Add(6 * day),
+		ExpiresAt:       t0.Add(week),
+		Status:          store.StatusStored,
+	}, created)
+}
+
 func TestFullLifecycleToExpired(t *testing.T) {
-	env := newEnv(t)
+	h := newHarness(t)
 
-	var initial, beforeReminder, afterReminder, afterExpiry, muchLater ItemState
-	env.RegisterDelayedCallback(func() { initial = queryState(t, env) }, time.Minute)
-	env.RegisterDelayedCallback(func() { beforeReminder = queryState(t, env) }, 6*day-time.Minute)
-	env.RegisterDelayedCallback(func() { afterReminder = queryState(t, env) }, 6*day+time.Minute)
-	env.RegisterDelayedCallback(func() { afterExpiry = queryState(t, env) }, week+time.Minute)
-	env.RegisterDelayedCallback(func() { muchLater = queryState(t, env) }, 60*day)
-	env.RegisterDelayedCallback(func() { sendUpdate(env, UpdateCollect) }, 60*day+time.Minute)
+	var beforeReminder, afterReminder, afterExpiry, muchLater store.Item
+	var queried ItemState
+	h.env.RegisterDelayedCallback(func() { beforeReminder = h.storedItem(t) }, 6*day-time.Minute)
+	h.env.RegisterDelayedCallback(func() { afterReminder = h.storedItem(t) }, 6*day+time.Minute)
+	h.env.RegisterDelayedCallback(func() {
+		afterExpiry = h.storedItem(t)
+		queried = queryState(t, h.env)
+	}, week+time.Minute)
+	h.env.RegisterDelayedCallback(func() { muchLater = h.storedItem(t) }, 60*day)
+	h.env.RegisterDelayedCallback(func() { sendUpdate(h.env, UpdateCollect) }, 60*day+time.Minute)
 
-	env.ExecuteWorkflow(StorageItemWorkflow, testInput())
-	final := finalState(t, env)
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+	final := finalState(t, h.env)
 
-	assert.Equal(t, StatusStored, initial.Status)
-	assert.Equal(t, t0, initial.StoredAt)
-	assert.Equal(t, t0.Add(6*day), initial.ReminderAt)
-	assert.Equal(t, t0.Add(week), initial.ExpiresAt)
-	assert.Empty(t, initial.Notifications)
+	assert.Equal(t, store.StatusStored, beforeReminder.Status)
+	assert.Empty(t, beforeReminder.Notifications)
 
-	assert.Equal(t, StatusStored, beforeReminder.Status)
-
-	assert.Equal(t, StatusExpiringSoon, afterReminder.Status)
+	assert.Equal(t, store.StatusExpiringSoon, afterReminder.Status)
 	require.Len(t, afterReminder.Notifications, 1)
-	assert.Equal(t, KindExpiringSoon, afterReminder.Notifications[0].Kind)
+	assert.Equal(t, store.KindExpiringSoon, afterReminder.Notifications[0].Kind)
 	assert.Equal(t, t0.Add(6*day), afterReminder.Notifications[0].SentAt)
 	assert.Contains(t, afterReminder.Notifications[0].Message, "1 day")
 
-	assert.Equal(t, StatusExpired, afterExpiry.Status)
-	assert.Equal(t, []NotificationKind{KindExpiringSoon, KindExpired}, kinds(afterExpiry.Notifications))
+	assert.Equal(t, store.StatusExpired, afterExpiry.Status)
+	assert.Equal(t, []store.NotificationKind{store.KindExpiringSoon, store.KindExpired}, kinds(afterExpiry.Notifications))
 	assert.Equal(t, t0.Add(week), afterExpiry.Notifications[1].SentAt)
+	assert.Nil(t, afterExpiry.EndedAt)
+
+	// The Query mirrors the store.
+	assert.Equal(t, afterExpiry.Status, queried.Status)
+	assert.Equal(t, afterExpiry.Notifications, queried.Notifications)
 
 	// Nothing further is sent after expiry.
-	assert.Equal(t, StatusExpired, muchLater.Status)
+	assert.Equal(t, store.StatusExpired, muchLater.Status)
 	assert.Len(t, muchLater.Notifications, 2)
 
-	assert.Equal(t, StatusCollected, final.Status)
-	assert.Len(t, final.Notifications, 2)
+	stored := h.storedItem(t)
+	assert.Equal(t, store.StatusCollected, stored.Status)
+	require.NotNil(t, stored.EndedAt)
+	assert.Equal(t, t0.Add(60*day+time.Minute), *stored.EndedAt)
+	assert.Equal(t, store.StatusCollected, final.Status)
+	assert.Equal(t, stored.Notifications, final.Notifications)
 }
 
 // nonTerminalStates gives a point in time inside each non-terminal state of a
@@ -134,32 +197,34 @@ func TestFullLifecycleToExpired(t *testing.T) {
 var nonTerminalStates = []struct {
 	name   string
 	at     time.Duration
-	before []NotificationKind
+	before []store.NotificationKind
 }{
-	{"Stored", time.Hour, []NotificationKind{}},
-	{"ExpiringSoon", 6*day + time.Hour, []NotificationKind{KindExpiringSoon}},
-	{"Expired", week + time.Hour, []NotificationKind{KindExpiringSoon, KindExpired}},
+	{"Stored", time.Hour, []store.NotificationKind{}},
+	{"ExpiringSoon", 6*day + time.Hour, []store.NotificationKind{store.KindExpiringSoon}},
+	{"Expired", week + time.Hour, []store.NotificationKind{store.KindExpiringSoon, store.KindExpired}},
 }
 
 func TestCollectFromEachState(t *testing.T) {
 	for _, tc := range nonTerminalStates {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newEnv(t)
+			h := newHarness(t)
 			var r *updateResult
-			env.RegisterDelayedCallback(func() { r = sendUpdate(env, UpdateCollect) }, tc.at)
+			h.env.RegisterDelayedCallback(func() { r = sendUpdate(h.env, UpdateCollect) }, tc.at)
 
-			env.ExecuteWorkflow(StorageItemWorkflow, testInput())
-			final := finalState(t, env)
+			h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+			final := finalState(t, h.env)
 
 			require.True(t, r.accepted)
 			require.True(t, r.done)
 			require.NoError(t, r.err)
-			assert.Equal(t, StatusCollected, r.state.Status)
+			assert.Equal(t, store.StatusCollected, r.state.Status)
+			assert.Equal(t, store.StatusCollected, final.Status)
 
-			assert.Equal(t, StatusCollected, final.Status)
-			require.NotNil(t, final.EndedAt)
-			assert.Equal(t, t0.Add(tc.at), *final.EndedAt)
-			assert.Equal(t, tc.before, kinds(final.Notifications))
+			stored := h.storedItem(t)
+			assert.Equal(t, store.StatusCollected, stored.Status)
+			require.NotNil(t, stored.EndedAt)
+			assert.Equal(t, t0.Add(tc.at), *stored.EndedAt)
+			assert.Equal(t, tc.before, kinds(stored.Notifications))
 		})
 	}
 }
@@ -167,27 +232,29 @@ func TestCollectFromEachState(t *testing.T) {
 func TestRemoveFromEachState(t *testing.T) {
 	for _, tc := range nonTerminalStates {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newEnv(t)
+			h := newHarness(t)
 			var r *updateResult
-			env.RegisterDelayedCallback(func() { r = sendUpdate(env, UpdateRemove) }, tc.at)
+			h.env.RegisterDelayedCallback(func() { r = sendUpdate(h.env, UpdateRemove) }, tc.at)
 
-			env.ExecuteWorkflow(StorageItemWorkflow, testInput())
-			final := finalState(t, env)
+			h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+			final := finalState(t, h.env)
 
-			want := append(append([]NotificationKind{}, tc.before...), KindRemovedByAdmin)
+			want := append(append([]store.NotificationKind{}, tc.before...), store.KindRemovedByAdmin)
 
 			// The Update result is the final state, including the removal
 			// notification.
 			require.True(t, r.accepted)
 			require.True(t, r.done)
 			require.NoError(t, r.err)
-			assert.Equal(t, StatusRemovedByAdmin, r.state.Status)
+			assert.Equal(t, store.StatusRemovedByAdmin, r.state.Status)
 			assert.Equal(t, want, kinds(r.state.Notifications))
+			assert.Equal(t, store.StatusRemovedByAdmin, final.Status)
 
-			assert.Equal(t, StatusRemovedByAdmin, final.Status)
-			require.NotNil(t, final.EndedAt)
-			assert.Equal(t, want, kinds(final.Notifications))
-			assert.Contains(t, final.Notifications[len(want)-1].Message, "removed")
+			stored := h.storedItem(t)
+			assert.Equal(t, store.StatusRemovedByAdmin, stored.Status)
+			require.NotNil(t, stored.EndedAt)
+			assert.Equal(t, want, kinds(stored.Notifications))
+			assert.Contains(t, stored.Notifications[len(want)-1].Message, "removed")
 		})
 	}
 }
@@ -196,100 +263,156 @@ func TestRemoveFromEachState(t *testing.T) {
 // Update. (Once the workflow has completed, the server rejects Updates itself
 // with "workflow execution already completed"; the API handles that case.)
 func TestSecondTerminalUpdateRejected(t *testing.T) {
-	t.Run("collect while remove notification in flight", func(t *testing.T) {
-		env := newEnv(t)
-		env.OnActivity(SendNotification, mock.Anything, mock.Anything).After(30 * time.Second).Return(nil)
+	h := newHarness(t)
+	h.delaySendNotification(30 * time.Second)
 
-		var remove, collect *updateResult
-		env.RegisterDelayedCallback(func() { remove = sendUpdate(env, UpdateRemove) }, time.Hour)
-		env.RegisterDelayedCallback(func() { collect = sendUpdate(env, UpdateCollect) }, time.Hour+10*time.Second)
+	var remove, collect *updateResult
+	h.env.RegisterDelayedCallback(func() { remove = sendUpdate(h.env, UpdateRemove) }, time.Hour)
+	h.env.RegisterDelayedCallback(func() { collect = sendUpdate(h.env, UpdateCollect) }, time.Hour+10*time.Second)
 
-		env.ExecuteWorkflow(StorageItemWorkflow, testInput())
-		final := finalState(t, env)
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+	finalState(t, h.env)
 
-		assert.True(t, remove.accepted)
-		assert.True(t, remove.done)
-		assertItemEnded(t, collect)
-		assert.Equal(t, StatusRemovedByAdmin, final.Status)
-		assert.Equal(t, []NotificationKind{KindRemovedByAdmin}, kinds(final.Notifications))
-		assert.Equal(t, t0.Add(time.Hour+30*time.Second), *final.EndedAt)
-	})
+	assert.True(t, remove.accepted)
+	assert.True(t, remove.done)
+	assertRejected(t, collect, ErrTypeItemEnded)
+
+	stored := h.storedItem(t)
+	assert.Equal(t, store.StatusRemovedByAdmin, stored.Status)
+	assert.Equal(t, []store.NotificationKind{store.KindRemovedByAdmin}, kinds(stored.Notifications))
+	assert.Equal(t, t0.Add(time.Hour+30*time.Second), *stored.EndedAt)
 }
 
-func assertItemEnded(t *testing.T, r *updateResult) {
+func assertRejected(t *testing.T, r *updateResult, errType string) {
 	t.Helper()
 	require.NotNil(t, r)
 	assert.False(t, r.accepted)
 	var appErr *temporal.ApplicationError
 	require.True(t, errors.As(r.rejected, &appErr), "want ApplicationError, got %v", r.rejected)
-	assert.Equal(t, ErrTypeItemEnded, appErr.Type())
+	assert.Equal(t, errType, appErr.Type())
 }
 
 func TestTerminalUpdateDuringTimerNotification(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		kind   NotificationKind
+		kind   store.NotificationKind
 		at     time.Duration
 		update string
-		status Status
-		want   []NotificationKind
+		status store.Status
+		want   []store.NotificationKind
 	}{
-		{"collect during reminder", KindExpiringSoon, 6 * day, UpdateCollect, StatusCollected,
-			[]NotificationKind{KindExpiringSoon}},
-		{"remove during expiry", KindExpired, week, UpdateRemove, StatusRemovedByAdmin,
-			[]NotificationKind{KindExpiringSoon, KindExpired, KindRemovedByAdmin}},
+		{"collect during reminder", store.KindExpiringSoon, 6 * day, UpdateCollect, store.StatusCollected,
+			[]store.NotificationKind{store.KindExpiringSoon}},
+		{"remove during expiry", store.KindExpired, week, UpdateRemove, store.StatusRemovedByAdmin,
+			[]store.NotificationKind{store.KindExpiringSoon, store.KindExpired, store.KindRemovedByAdmin}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newEnv(t)
-			isKind := mock.MatchedBy(func(n Notification) bool { return n.Kind == tc.kind })
-			env.OnActivity(SendNotification, mock.Anything, isKind).After(time.Minute).Return(nil)
-			env.OnActivity(SendNotification, mock.Anything, mock.Anything).Return(nil)
+			h := newHarness(t)
+			h.delaySendNotification(time.Minute, tc.kind)
 
 			var r *updateResult
-			env.RegisterDelayedCallback(func() { r = sendUpdate(env, tc.update) }, tc.at+10*time.Second)
+			h.env.RegisterDelayedCallback(func() { r = sendUpdate(h.env, tc.update) }, tc.at+10*time.Second)
 
-			env.ExecuteWorkflow(StorageItemWorkflow, testInput())
-			final := finalState(t, env)
+			h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+			final := finalState(t, h.env)
 
 			require.True(t, r.accepted)
 			// The timer-driven transition must not overwrite the terminal
 			// status, and no later timer notification is sent.
 			assert.Equal(t, tc.status, final.Status)
-			assert.ElementsMatch(t, tc.want, kinds(final.Notifications))
+			stored := h.storedItem(t)
+			assert.Equal(t, tc.status, stored.Status)
+			assert.ElementsMatch(t, tc.want, kinds(stored.Notifications))
 		})
 	}
 }
 
+// A timer-driven SetItemStatus still in flight when collect writes Collected
+// must not overwrite it, in the store or in the workflow state.
+func TestLateTimerStatusWriteIgnored(t *testing.T) {
+	h := newHarness(t)
+	isExpiringSoon := mock.MatchedBy(func(in SetItemStatusInput) bool { return in.Status == store.StatusExpiringSoon })
+	h.env.OnActivity(h.acts.SetItemStatus, mock.Anything, isExpiringSoon).After(time.Minute).Return(h.acts.SetItemStatus)
+	h.env.OnActivity(h.acts.SetItemStatus, mock.Anything, mock.Anything).Return(h.acts.SetItemStatus)
+
+	h.env.RegisterDelayedCallback(func() { sendUpdate(h.env, UpdateCollect) }, 6*day+10*time.Second)
+
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+	final := finalState(t, h.env)
+
+	assert.Equal(t, store.StatusCollected, final.Status)
+	assert.Equal(t, store.StatusCollected, h.storedItem(t).Status)
+}
+
+// Updates that arrive before CreateItem has finished wait for it, so the
+// terminal status is written to an item that exists.
+func TestUpdateBeforeItemCreated(t *testing.T) {
+	h := newHarness(t)
+	h.env.OnActivity(h.acts.CreateItem, mock.Anything, mock.Anything).After(time.Minute).Return(h.acts.CreateItem)
+
+	var r *updateResult
+	h.env.RegisterDelayedCallback(func() { r = sendUpdate(h.env, UpdateCollect) }, 10*time.Second)
+
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+	finalState(t, h.env)
+
+	require.True(t, r.accepted)
+	require.NoError(t, r.err)
+	stored := h.storedItem(t)
+	assert.Equal(t, store.StatusCollected, stored.Status)
+	assert.Equal(t, t0.Add(time.Minute), *stored.EndedAt)
+}
+
 func TestCompressedTiming(t *testing.T) {
-	env := newEnv(t)
+	h := newHarness(t)
 	in := testInput()
 	in.StorageDuration = 7 * time.Minute
 
-	var afterExpiry ItemState
-	env.RegisterDelayedCallback(func() { afterExpiry = queryState(t, env) }, 7*time.Minute+time.Second)
-	env.RegisterDelayedCallback(func() { sendUpdate(env, UpdateCollect) }, 10*time.Minute)
+	var afterExpiry store.Item
+	h.env.RegisterDelayedCallback(func() { afterExpiry = h.storedItem(t) }, 7*time.Minute+time.Second)
+	h.env.RegisterDelayedCallback(func() { sendUpdate(h.env, UpdateCollect) }, 10*time.Minute)
 
-	env.ExecuteWorkflow(StorageItemWorkflow, in)
-	finalState(t, env)
+	h.env.ExecuteWorkflow(StorageItemWorkflow, in)
+	finalState(t, h.env)
 
+	assert.Equal(t, t0.Add(6*time.Minute), afterExpiry.ReminderAt)
 	require.Len(t, afterExpiry.Notifications, 2)
 	assert.Equal(t, t0.Add(6*time.Minute), afterExpiry.Notifications[0].SentAt)
 	assert.Contains(t, afterExpiry.Notifications[0].Message, "1 minute")
 	assert.Equal(t, t0.Add(7*time.Minute), afterExpiry.Notifications[1].SentAt)
 }
 
+// If the store has lost the item (for example, after a restart of the
+// in-memory store), the activity fails without retrying and so does the
+// workflow.
+func TestItemMissingFromStoreFailsWorkflow(t *testing.T) {
+	h := newHarness(t)
+	// CreateItem "succeeds" without writing anything.
+	h.env.OnActivity(h.acts.CreateItem, mock.Anything, mock.Anything).Return(nil)
+
+	h.env.ExecuteWorkflow(StorageItemWorkflow, testInput())
+
+	require.True(t, h.env.IsWorkflowCompleted())
+	var appErr *temporal.ApplicationError
+	require.True(t, errors.As(h.env.GetWorkflowError(), &appErr), "got %v", h.env.GetWorkflowError())
+	assert.Equal(t, ErrTypeItemNotFound, appErr.Type())
+	assert.True(t, appErr.NonRetryable())
+}
+
 func TestInvalidDurationFails(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Hour} {
-		env := newEnv(t)
+		h := newHarness(t)
 		in := testInput()
 		in.StorageDuration = d
 
-		env.ExecuteWorkflow(StorageItemWorkflow, in)
+		h.env.ExecuteWorkflow(StorageItemWorkflow, in)
 
-		require.True(t, env.IsWorkflowCompleted())
+		require.True(t, h.env.IsWorkflowCompleted())
 		var appErr *temporal.ApplicationError
-		require.True(t, errors.As(env.GetWorkflowError(), &appErr))
+		require.True(t, errors.As(h.env.GetWorkflowError(), &appErr))
 		assert.Equal(t, ErrTypeInvalidInput, appErr.Type())
+		_, err := h.store.GetItem(context.Background(), "item-1")
+		assert.ErrorIs(t, err, store.ErrNotFound, "nothing is written for invalid input")
 	}
 }
 

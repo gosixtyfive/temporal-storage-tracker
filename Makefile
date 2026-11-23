@@ -5,8 +5,8 @@ STORAGE_DURATION ?= 7m
 
 .PHONY: temporal worker api test build vet
 
-temporal: ## Temporal dev server with the ItemStatus search attribute (UI on :8233)
-	temporal server start-dev --search-attribute ItemStatus=Keyword
+temporal: ## Temporal dev server (UI on :8233)
+	temporal server start-dev
 
 worker: ## Run the Temporal worker
 	cd backend && go run ./cmd/worker

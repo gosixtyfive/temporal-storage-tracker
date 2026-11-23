@@ -155,6 +155,10 @@ non-retryable `ItemNotFound` error, and the workflow fails.
 Retry policy: Temporal's default (unlimited retries with backoff), with a
 `StartToCloseTimeout` of 10 seconds.
 
+Activity options are applied on every call (the `execute` helper), not once
+on the workflow's main context: Update handlers receive their own context,
+which does not inherit options set on the main one.
+
 ## Testing
 
 Use the Go SDK's `testsuite.WorkflowTestSuite`. Its test environment skips
