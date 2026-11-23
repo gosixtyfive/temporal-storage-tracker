@@ -167,6 +167,21 @@ place of Temporal.
   There are no accounts.
 - **Live updates.** The status view and dashboard poll the API every few
   seconds, which is enough for compressed demo timings.
+- **Client-side only.** Nuxt runs with `ssr: false`. The role lives in browser
+  storage, so server rendering would paint the wrong role first; nothing
+  needs SEO or server-side data loading.
+- **UI library.** Nuxt UI (built on Tailwind) for forms, badges, tables and
+  toasts.
+- **API access.** A Nuxt route rule proxies `/api/**` to the Go server
+  (`http://localhost:8080` by default, overridable by environment variable).
+  A `useApi()` composable holds typed versions of the API's JSON and turns
+  `{"error": ...}` responses into errors that carry the status code; a `404`
+  on an item means "pending".
+- **Roles on any page.** Every page loads for either role; only actions
+  depend on it. A member on `/dashboard` sees a hint to switch to Admin rather
+  than a redirect.
+- **Finding an item again.** Only by its URL; the dashboard is the only list
+  of items. The browser does not remember a member's items.
 
 ## Time compression
 
@@ -184,21 +199,31 @@ duration). The default is `168h` (7 days); a demo might use `7m`.
 Run each in its own terminal from the repo root (see the `Makefile`):
 
 ```bash
-make temporal   # Temporal dev server
-make server     # API + worker on :8080; STORAGE_DURATION defaults to 7m here
-cd frontend && npm run dev   # frontend
+make temporal           # Temporal dev server (Web UI on :8233)
+make server             # API + worker + store on :8080; STORAGE_DURATION defaults to 7m here
+make frontend-install   # once: frontend dependencies from the lockfile
+make frontend           # Nuxt dev server on http://localhost:3000
 ```
 
-`make test`, `make vet` and `make build` cover the backend.
+`make test`, `make vet` and `make build` cover the backend;
+`make frontend-check` typechecks and unit-tests the frontend.
 
 Environment variables:
 
-| Variable | Default |
-|----------|---------|
-| `TEMPORAL_ADDRESS` | `localhost:7233` |
-| `TEMPORAL_NAMESPACE` | `default` |
-| `STORAGE_DURATION` | `168h` (`make server` overrides it to `7m`) |
-| `PORT` | `8080` |
+| Variable | Used by | Default |
+|----------|---------|---------|
+| `TEMPORAL_ADDRESS` | server | `localhost:7233` |
+| `TEMPORAL_NAMESPACE` | server | `default` |
+| `STORAGE_DURATION` | server | `168h` (`make server` overrides it to `7m`) |
+| `PORT` | server | `8080` |
+| `NUXT_API_TARGET` | frontend (read at startup) | `http://localhost:8080` |
+
+**Frontend dependencies and npm versions.** `npm ci` installs from the
+lockfile and works with npm 10. Adding or upgrading a dependency changes the
+lockfile, and npm 10.9 crashes while resolving this dependency tree
+(`Cannot read properties of null (reading 'edgesOut')`), so use npm 11 for
+that: `npx -y npm@11 install <pkg>`. Some packages also ask for Node 22.21 or
+later; 22.18 works but prints a warning.
 
 The Temporal Web UI (http://localhost:8233) shows workflow histories next to
 the app. That is a large part of the demo.
@@ -213,7 +238,12 @@ backend/                     Go module github.com/gosixtyfive/temporal-storage-t
   internal/store/            Store interface and in-memory implementation
   internal/temporalclient/   Temporal client setup from the environment
   internal/api/              HTTP handlers
-frontend/                    Nuxt app (planned)
+frontend/                    Nuxt app
+  app/pages/                 Routes: /, /store, /items/[id], /dashboard
+  app/components/            Header, role switch, role hint
+  app/composables/           useApi(), useRole()
+  app/utils/                 API types and client, role state, formatting
+  test/                      Vitest unit tests for app/utils
 brain/                       What the project does
 docs/                        How it is built
 ```
