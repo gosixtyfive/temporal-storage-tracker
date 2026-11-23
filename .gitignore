@@ -8,3 +8,6 @@
 
 # Go build output
 backend/bin/
+
+# Obsidian vault settings
+.obsidian/
