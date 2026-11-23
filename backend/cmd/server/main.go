@@ -1,5 +1,6 @@
-// Command api serves the HTTP API that the frontend uses. It is a thin layer
-// over the Temporal client. See docs/architecture.md.
+// Command server runs the whole backend in one process: the HTTP API, the
+// Temporal worker hosting StorageItemWorkflow and its activities, and the
+// in-memory item store they share. See docs/architecture.md#components.
 package main
 
 import (
@@ -13,6 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"go.temporal.io/sdk/worker"
+
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/storage"
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/temporalclient"
 )
 
@@ -21,7 +26,7 @@ const defaultStorageDuration = 7 * 24 * time.Hour
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(logger); err != nil {
-		logger.Error("api stopped", "err", err)
+		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
 }
@@ -38,11 +43,27 @@ func run(logger *slog.Logger) error {
 	}
 	defer c.Close()
 
+	// One store, shared by the worker's activities (writes) and the API
+	// (reads). It lives only as long as this process.
+	st := store.NewMemory()
+
+	errCh := make(chan error, 2)
+
+	w := worker.New(c, storage.TaskQueue, worker.Options{
+		OnFatalError: func(err error) { errCh <- fmt.Errorf("worker: %w", err) },
+	})
+	w.RegisterWorkflow(storage.StorageItemWorkflow)
+	w.RegisterActivity(&storage.Activities{Store: st})
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("start worker: %w", err)
+	}
+	defer w.Stop()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// API routes are added in tst-ofp.4.
+	// API routes over st and c are added in tst-ofp.4.
 
 	addr := ":" + getenv("PORT", "8080")
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -50,21 +71,23 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("api listening", "addr", addr, "storageDuration", storageDuration)
+		logger.Info("server listening",
+			"addr", addr, "taskQueue", storage.TaskQueue, "storageDuration", storageDuration)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+			errCh <- fmt.Errorf("http: %w", err)
 		}
-		close(errCh)
 	}()
 
 	select {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		logger.Info("shutting down")
 	}
 
+	// Stop taking requests first; the deferred w.Stop then lets in-flight
+	// activities finish.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)

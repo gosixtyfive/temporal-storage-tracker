@@ -1,18 +1,15 @@
 # Local development targets. See docs/architecture.md#local-development.
-# Run temporal, worker, api (and later frontend) in separate terminals.
+# Run temporal, server (and later frontend) in separate terminals.
 
 STORAGE_DURATION ?= 7m
 
-.PHONY: temporal worker api test build vet
+.PHONY: temporal server test build vet
 
 temporal: ## Temporal dev server (UI on :8233)
 	temporal server start-dev
 
-worker: ## Run the Temporal worker
-	cd backend && go run ./cmd/worker
-
-api: ## Run the HTTP API (compressed demo timing by default)
-	cd backend && STORAGE_DURATION=$(STORAGE_DURATION) go run ./cmd/api
+server: ## Run the API + worker + store on :8080 (compressed demo timing by default)
+	cd backend && STORAGE_DURATION=$(STORAGE_DURATION) go run ./cmd/server
 
 test: ## Run backend tests
 	cd backend && go test ./...
