@@ -20,6 +20,15 @@ export default defineNuxtConfig({
     },
   },
 
+  runtimeConfig: {
+    public: {
+      // Each dashboard card links to its workflow in the Temporal Web UI.
+      // Override with NUXT_PUBLIC_TEMPORAL_UI_URL / NUXT_PUBLIC_TEMPORAL_NAMESPACE.
+      temporalUiUrl: 'http://localhost:8233',
+      temporalNamespace: 'default',
+    },
+  },
+
   routeRules: {
     '/api/**': { proxy: `${apiTarget}/api/**` },
   },

@@ -167,8 +167,22 @@ place of Temporal.
   accounts), the item name, and an optional description. After a successful
   add it stays on the form, clears it except for the member name, and shows a
   toast, so several items can be entered in a row.
-- **Live updates.** The dashboard polls the API every few seconds, which is
-  enough for compressed demo timings.
+- **Dashboard.** A responsive grid of item cards rather than a table, so it
+  still works in a half-width window next to Add item. Each card shows the
+  item, a status badge, time left (a countdown with a progress bar; "expired
+  N ago" after expiry; the end time once ended), its notifications, a link to
+  the item's workflow in the Temporal Web UI, and Collect / Remove while the
+  item is active. Ended cards are dimmed. Above the cards, one tile per
+  status shows its count and filters the list (in the browser; the API's
+  `?status=` is not needed). Actions take one click, with no confirmation;
+  a `409` shows the server's message and refreshes.
+- **Live updates.** The dashboard polls `GET /api/items` every 2 seconds
+  (no overlapping requests, paused while the tab is hidden, refreshed when
+  it becomes visible). A shared 1-second clock drives the countdowns, using
+  the browser's clock against the API's timestamps. When a poll brings a new
+  notification, the dashboard shows a toast and briefly highlights that card.
+  If the server cannot be reached, it keeps the last data and shows a
+  "retrying" banner.
 - **Client-side only.** Nuxt runs with `ssr: false`. Every view is live data
   from the API, so server rendering would add nothing; nothing needs SEO.
 - **UI library.** Nuxt UI (built on Tailwind) for forms, badges, tables and
@@ -217,6 +231,8 @@ Environment variables:
 | `STORAGE_DURATION` | server | `168h` (`make server` overrides it to `7m`) |
 | `PORT` | server | `8080` |
 | `NUXT_API_TARGET` | frontend (read at startup) | `http://localhost:8080` |
+| `NUXT_PUBLIC_TEMPORAL_UI_URL` | frontend | `http://localhost:8233` |
+| `NUXT_PUBLIC_TEMPORAL_NAMESPACE` | frontend | `default` |
 
 **Frontend dependencies and npm versions.** `npm ci` installs from the
 lockfile and works with npm 10. Adding or upgrading a dependency changes the
@@ -241,8 +257,8 @@ backend/                     Go module github.com/gosixtyfive/temporal-storage-t
 frontend/                    Nuxt app
   app/pages/                 Routes: / (redirect), /add, /dashboard
   app/components/            Header with the view switch, dashboard parts
-  app/composables/           useApi()
-  app/utils/                 API types and client, formatting
+  app/composables/           useApi(), usePolledItems(), useNow()
+  app/utils/                 API types and client, dashboard logic, form checks, formatting
   test/                      Vitest unit tests for app/utils
 brain/                       What the project does
 docs/                        How it is built
