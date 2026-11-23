@@ -16,6 +16,7 @@ import (
 
 	"go.temporal.io/sdk/worker"
 
+	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/api"
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/storage"
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/store"
 	"github.com/gosixtyfive/temporal-storage-tracker/backend/internal/temporalclient"
@@ -63,7 +64,12 @@ func run(logger *slog.Logger) error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// API routes over st and c are added in tst-ofp.4.
+	api.New(api.Config{
+		Store:           st,
+		Workflows:       api.NewWorkflows(c),
+		StorageDuration: storageDuration,
+		Logger:          logger,
+	}).Register(mux)
 
 	addr := ":" + getenv("PORT", "8080")
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}

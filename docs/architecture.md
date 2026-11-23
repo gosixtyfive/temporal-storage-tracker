@@ -123,7 +123,32 @@ persistent store.
   `GET /api/items/{id}` returns `404`. The status view, which the form
   navigates to, shows "pending" and keeps polling until the item appears.
 - Updates return the item as read from the store after the Update completes,
-  or an error, so the UI can react without waiting for the next poll.
+  or an error, so the UI can react without waiting for the next poll. The
+  handler checks the store first: unknown items get `404` and ended items
+  `409` without calling Temporal.
+
+**JSON.** camelCase keys, RFC 3339 timestamps in UTC, durations in seconds.
+`endedAt` is `null` until the item ends; `notifications` is always a list.
+Lists are wrapped as `{"items": [...]}`; errors are `{"error": "message"}`.
+
+**Errors.**
+
+| Status | When |
+|--------|------|
+| `400` | Invalid JSON, missing or too-long fields, unknown `?status=` |
+| `404` | ID not of the form `item-<uuid>`, or no such item in the store (yet) |
+| `409` | Item already ended: found in the store, rejected by the workflow's validator (`ItemEnded`), or the workflow had already completed (`NotFound` from Temporal) |
+| `503` | Temporal reports itself unavailable |
+| `504` | A Temporal call did not finish within 10 seconds |
+
+Every Temporal call has a 10-second timeout, because an Update blocks until
+a worker runs it. If the Temporal server is down, the SDK keeps retrying the
+connection until that timeout, so in practice an outage shows up as `504`
+rather than `503`.
+
+The handlers (`internal/api`) depend on a small `Workflows` interface rather
+than the Temporal client, so tests use the in-memory store with a fake in
+place of Temporal.
 
 ## Frontend
 
